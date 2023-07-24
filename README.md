@@ -1,6 +1,13 @@
-## Liftwing Revert-Risk PErformance Testing
+# Liftwing Revert-Risk Performance Testing
 
-Replace `your-wikimedia-api-access-token` with the actual access token you received from the Wikimedia API portal.
+## Setup
+1. create an environment variable in root directory.
+
+## Usage
+Run the code by executing: 
+```bash
+   go run main.go
+   ```
 
 Explanation of the variables:
 - `ACCESS_TOKEN`: Your personal access token to authenticate API requests.
