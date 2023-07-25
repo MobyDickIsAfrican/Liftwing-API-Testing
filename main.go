@@ -19,6 +19,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+var (
+	RevisionLimit = 50
+)
+
 type Revision struct {
 	ID    int    `json:"id"`
 	NS    int    `json:"ns"`
@@ -63,7 +67,7 @@ func (c *Count) GetCount() float64 {
 }
 
 func main() {
-	var randomArticles = make(chan Articles, 10)
+	var randomArticles = make(chan Articles, RevisionLimit)
 	var wg sync.WaitGroup
 
 	db, err := sql.Open("sqlite3", "./response_times.db")
@@ -109,7 +113,8 @@ func main() {
 			randomIndex := rand.Intn(20) + 1
 			project := wikiProjects[randomIndex]
 
-			req, _ := http.NewRequest("GET", "https://"+project+".wikipedia.org/w/api.php?action=query&list=random&rnnamespace=0&rnlimit=10&format=json", nil)
+			query := fmt.Sprintf("https://%s.wikipedia.org/w/api.php?action=query&list=random&rnnamespace=0&rnlimit=%d&format=json", project, RevisionLimit)
+			req, _ := http.NewRequest("GET", query, nil)
 			resp, err := http.DefaultClient.Do(req)
 
 			if err != nil {
@@ -121,7 +126,6 @@ func main() {
 			var apiRes APIResponse
 			json.Unmarshal(body, &apiRes)
 			articles := Articles{Response: &apiRes, ProjectIdentifier: project}
-			log.Print(articles)
 
 			randomArticles <- articles
 		}
@@ -130,10 +134,7 @@ func main() {
 	count := &Count{}
 
 	t0 := time.Now()
-	dur, err := strconv.Atoi(os.Getenv("DURATION"))
-	if err != nil {
-		log.Fatal("Duration Atoi error: ", err)
-	}
+	dur := getDuration()
 	for rat := range randomArticles {
 		t1 := time.Since(t0).Seconds()
 		if t1 > float64(dur)*60 {
@@ -176,11 +177,20 @@ func main() {
 	wg.Wait()
 }
 
+// gets environment variable DURATION in minutes
+func getDuration() float64 {
+	duration, err := strconv.Atoi(os.Getenv("DURATION"))
+	if err != nil {
+		log.Fatal("GD Atoi error: ", err)
+	}
+	return float64(duration)
+}
+
 func Worker(identifier string, revision Revision, count *Count, wg *sync.WaitGroup,
 	slp int, db *sql.DB) {
 	defer wg.Done()
 	if slp != 0 {
-		time.Sleep(time.Duration(slp) * time.Millisecond)
+		time.Sleep(time.Duration(slp) * time.Second)
 	}
 
 	startTime := time.Now()
@@ -193,7 +203,6 @@ func Worker(identifier string, revision Revision, count *Count, wg *sync.WaitGro
 
 	responseTime := time.Since(startTime).Seconds()
 	count.Increment()
-	log.Print(responseTime)
 
 	statement, _ := db.Prepare("INSERT INTO response_times (revision_id, project_id, response_time) VALUES (?, ?, ?)")
 	statement.Exec(revision.ID, identifier, responseTime)
@@ -216,7 +225,7 @@ func getRiskScore(identifier string, revision Revision) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Risk Error: %s", err)
+		log.Fatalf("Risk Error: %s", err)
 		return err
 	}
 
@@ -227,33 +236,41 @@ func getRiskScore(identifier string, revision Revision) error {
 
 func calculateSleep(count float64) int {
 	cMax, err := strconv.Atoi(os.Getenv("LIMIT"))
-	cFloat := float64(cMax) * 60
+	cFloat := float64(cMax)
 	if err != nil {
 		log.Fatal("CS Atoi error: ", err)
 	}
-	if (count > 0.07*cFloat/10 && count < 0.10*cFloat/10) ||
-		(count > 0.17*cFloat/10 && count < 0.20*cFloat/10) ||
-		(count > 0.27*cFloat/10 && count < 0.30*cFloat/10) ||
-		(count > 0.37*cFloat/10 && count < 0.40*cFloat/10) ||
-		(count > 0.47*cFloat/10 && count < 0.50*cFloat/10) ||
-		(count > 0.57*cFloat/10 && count < 0.60*cFloat/10) ||
-		(count > 0.67*cFloat/10 && count < 0.70*cFloat/10) ||
-		(count > 0.77*cFloat/10 && count < 0.80*cFloat/10) ||
-		(count > 0.87*cFloat/10 && count < 0.90*cFloat/10) {
-		log.Print("spiking")
+	if (count > 0.07*cFloat && count < 0.10*cFloat) ||
+		(count > 0.17*cFloat && count < 0.20*cFloat) ||
+		(count > 0.27*cFloat && count < 0.30*cFloat) ||
+		(count > 0.37*cFloat && count < 0.40*cFloat) ||
+		(count > 0.47*cFloat && count < 0.50*cFloat) ||
+		(count > 0.57*cFloat && count < 0.60*cFloat) ||
+		(count > 0.67*cFloat && count < 0.70*cFloat) ||
+		(count > 0.77*cFloat && count < 0.80*cFloat) ||
+		(count > 0.87*cFloat && count < 0.90*cFloat) {
 		return linearModel(count)
 	}
 
 	return 0
 }
 
-func linearModel(count float64) int {
-	duration, err := strconv.Atoi(os.Getenv("DURATION"))
+func getLimit() float64 {
+	cMax, err := strconv.Atoi(os.Getenv("LIMIT"))
 	if err != nil {
-		log.Fatal("LM Atoi error: ", err)
+		log.Fatal("GL Atoi error: ", err)
 	}
+	cFloat := float64(cMax)
+	return cFloat
+}
 
-	gradient := math.Floor(((0.0-float64(duration))*60.0)/((count/10.0)*0.3) - 0.0)
-	yIntercept := float64(duration) * 60.0
-	return int(gradient*float64(count) + yIntercept)
+func linearModel(count float64) int {
+	duration := 5 * 60.0 // 5 minute sleep delay is the max
+	limit := getLimit()
+
+	spikeFraction := 0.03
+
+	gradient := math.Floor((0.0-duration)/(limit*spikeFraction) - 0.0)
+	yIntercept := duration
+	return int(gradient*count + yIntercept)
 }
